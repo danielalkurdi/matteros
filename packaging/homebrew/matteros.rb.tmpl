@@ -10,7 +10,12 @@ class Matteros < Formula
   depends_on "python@3.12"
 
   def install
-    virtualenv_install_with_resources(using: "python@3.12")
+    python = Formula["python@3.12"].opt_bin/"python3.12"
+    venv = virtualenv_create(libexec, python)
+
+    # Install project plus dependencies into the virtualenv.
+    system python, "-m", "pip", "--python=#{venv.root}/bin/python", "install", buildpath
+    bin.install_symlink venv.root/"bin/matteros"
   end
 
   test do

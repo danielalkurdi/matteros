@@ -16,6 +16,7 @@ from matteros.llm.errors import (
     LLMTimeoutError,
 )
 from matteros.llm.json_utils import parse_json_object
+from matteros.llm.tasks import get_registry
 
 
 class AnthropicProvider:
@@ -32,27 +33,34 @@ class AnthropicProvider:
         if not api_key:
             raise LLMConfigurationError("ANTHROPIC_API_KEY is not configured")
 
-        if task != "draft_time_entries":
-            raise LLMConfigurationError(f"unsupported anthropic task: {task}")
-        if not schema_name:
-            raise LLMConfigurationError("schema_name is required for anthropic structured output")
+        try:
+            spec = get_registry().get(task)
+        except KeyError as exc:
+            raise LLMConfigurationError(str(exc)) from exc
 
-        schema = schema_json(schema_name)
+        if spec.schema_name and not schema_name:
+            raise LLMConfigurationError(f"schema_name is required for task '{task}'")
+
+        schema = schema_json(schema_name) if schema_name else None
+        system_content = spec.system_prompt
+        user_content = spec.user_prompt_template.replace(
+            "{{payload}}", json.dumps(payload, ensure_ascii=True, sort_keys=True)
+        )
+        if schema:
+            user_content = (
+                f"Schema:\n{json.dumps(schema, ensure_ascii=True, sort_keys=True)}\n"
+                + user_content
+            )
+
         request_payload = {
             "model": self.model_name,
             "max_tokens": 2048,
             "temperature": 0,
-            "system": (
-                "You are a legal ops assistant. Return only valid JSON matching the provided schema."
-            ),
+            "system": system_content,
             "messages": [
                 {
                     "role": "user",
-                    "content": (
-                        "Generate a JSON response for task 'draft_time_entries'.\n"
-                        f"Schema:\n{json.dumps(schema, ensure_ascii=True, sort_keys=True)}\n"
-                        f"Payload:\n{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
-                    ),
+                    "content": user_content,
                 }
             ],
         }

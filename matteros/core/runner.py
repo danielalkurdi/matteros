@@ -22,7 +22,13 @@ from matteros.core.types import (
     TimeEntrySuggestion,
 )
 from matteros.llm.adapter import LLMAdapter
+from matteros.llm.tasks import get_registry
 from matteros.skills.draft_time_entries import cluster_activities
+
+
+_TRANSFORM_FUNCTIONS: dict[str, Callable[..., Any]] = {
+    "cluster_activities": cluster_activities,
+}
 
 
 _TEMPLATE_PATTERN = re.compile(r"\{\{\s*([^}]+?)\s*\}\}")
@@ -278,7 +284,8 @@ class WorkflowRunner:
         run_id: str,
     ) -> Any:
         function_name = str(step.config.get("function", "")).strip()
-        if function_name != "cluster_activities":
+        transform_fn = _TRANSFORM_FUNCTIONS.get(function_name)
+        if transform_fn is None:
             raise ValueError(f"unsupported transform function: {function_name}")
 
         sources = step.config.get("sources", [])
@@ -292,7 +299,7 @@ class WorkflowRunner:
             key = str(source)
             payload[key] = context.get(key, [])
 
-        return cluster_activities(payload)
+        return transform_fn(payload)
 
     def _execute_llm(
         self,
@@ -318,32 +325,46 @@ class WorkflowRunner:
             provider_override=str(provider) if provider else None,
         )
 
-        if schema_name:
-            normalized = normalize_named_schema(str(schema_name), result)
-            suggestions = normalized.get("suggestions", [])
-        else:
-            suggestions = result.get("suggestions", []) if isinstance(result, dict) else []
-
-        validated = [TimeEntrySuggestion.model_validate(item).model_dump(mode="json") for item in suggestions]
-
-        # Apply learned patterns (advisory — never breaks a run).
+        # Check if this task uses the time_entry_suggestions schema
         try:
-            from matteros.learning.patterns import PatternEngine
+            spec = get_registry().get(task)
+        except KeyError:
+            spec = None
 
-            engine = PatternEngine(self.store)
-            validated = engine.apply_patterns(validated)
-        except Exception:
-            import logging as _logging
+        if spec and spec.schema_name == "time_entry_suggestions.v1":
+            # Existing time entry validation path
+            if schema_name:
+                normalized = normalize_named_schema(str(schema_name), result)
+                suggestions = normalized.get("suggestions", [])
+            else:
+                suggestions = result.get("suggestions", []) if isinstance(result, dict) else []
 
-            _logging.getLogger(__name__).warning("pattern application failed", exc_info=True)
+            validated = [TimeEntrySuggestion.model_validate(item).model_dump(mode="json") for item in suggestions]
 
+            # Apply learned patterns (advisory -- never breaks a run).
+            try:
+                from matteros.learning.patterns import PatternEngine
+
+                engine = PatternEngine(self.store, event_bus=self.event_bus)
+                validated = engine.apply_patterns(validated)
+            except Exception:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning("pattern application failed", exc_info=True)
+
+            output = validated
+        else:
+            # Generic task: return result as-is
+            output = result
+
+        output_count = len(output) if isinstance(output, list) else 1
         self._audit_and_emit(
             run_id=run_id,
             event_type="llm.output.validated",
             actor="system",
             step_id=step.id,
             data={
-                "suggestion_count": len(validated),
+                "suggestion_count": output_count,
                 "schema": schema_name,
                 "provider": llm_meta.get("provider"),
                 "model": llm_meta.get("model"),
@@ -351,7 +372,7 @@ class WorkflowRunner:
                 "latency_ms": llm_meta.get("latency_ms"),
             },
         )
-        return validated
+        return output
 
     def _execute_approve(
         self,

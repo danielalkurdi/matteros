@@ -82,3 +82,31 @@ def test_event_data_preserved() -> None:
 
     assert received[0].step_id == "collect_calendar"
     assert received[0].data["output_key"] == "calendar_events"
+
+
+def test_subscribe_to_draft_created() -> None:
+    bus = EventBus()
+    received = []
+    bus.subscribe(EventType.DRAFT_CREATED, lambda e: received.append(e))
+
+    bus.emit(RunEvent(
+        event_type=EventType.DRAFT_CREATED,
+        run_id="r1",
+        data={"draft_id": "d1"},
+    ))
+    assert len(received) == 1
+    assert received[0].data["draft_id"] == "d1"
+
+
+def test_subscribe_to_pattern_learned() -> None:
+    bus = EventBus()
+    received = []
+    bus.subscribe(EventType.PATTERN_LEARNED, lambda e: received.append(e))
+
+    bus.emit(RunEvent(
+        event_type=EventType.PATTERN_LEARNED,
+        run_id="r1",
+        data={"pattern_id": "p1", "pattern_type": "matter_assignment"},
+    ))
+    assert len(received) == 1
+    assert received[0].data["pattern_type"] == "matter_assignment"

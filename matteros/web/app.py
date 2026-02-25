@@ -12,14 +12,16 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from matteros.core.config import load_config
+from matteros.core.events import EventBus
 from matteros.core.factory import resolve_home
 from matteros.core.store import SQLiteStore
 from matteros.drafts.manager import DraftManager
+from matteros.web.run_service import RunService
 
 
 AUTH_COOKIE_NAME = "matteros_session"
@@ -293,5 +295,90 @@ def create_app(*, home: Path | None = None) -> FastAPI:
         if run_id:
             return store.list_audit_events_for_run(run_id=run_id)
         return store.list_audit_events(limit=limit)
+
+    # ---------- Run trigger ----------
+
+    _run_event_bus = EventBus()
+
+    def _run_service() -> RunService:
+        return RunService(home_dir)
+
+    @app.post("/api/runs")
+    async def api_trigger_run(
+        body: dict[str, Any] = Body(...),
+    ) -> JSONResponse:
+        playbook = body.get("playbook")
+        if not playbook or not isinstance(playbook, str):
+            raise HTTPException(status_code=422, detail="playbook name is required")
+
+        inputs = body.get("inputs", {})
+        if not isinstance(inputs, dict):
+            raise HTTPException(status_code=422, detail="inputs must be an object")
+
+        dry_run = body.get("dry_run", True)
+
+        svc = _run_service()
+        try:
+            run_id = svc.trigger_run(
+                playbook_name=playbook,
+                inputs=inputs,
+                dry_run=bool(dry_run),
+                event_bus=_run_event_bus,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+        return JSONResponse({"run_id": run_id, "status": "started"}, status_code=201)
+
+    @app.get("/runs/new", response_class=HTMLResponse)
+    async def run_trigger_page(request: Request) -> HTMLResponse:
+        svc = _run_service()
+        playbooks = svc.list_playbooks()
+        return templates.TemplateResponse("run_trigger.html", {
+            "request": request,
+            "playbooks": playbooks,
+        })
+
+    @app.get("/runs/{run_id}/live")
+    async def run_live_stream(run_id: str, since: int = Query(0, ge=0)) -> StreamingResponse:
+        store = _store()
+
+        async def generate():
+            last_seq = since
+            while True:
+                with store.connection() as conn:
+                    rows = conn.execute(
+                        """
+                        SELECT seq, run_id, event_type, step_id, data_json
+                        FROM audit_events
+                        WHERE run_id = ? AND seq > ?
+                        ORDER BY seq ASC
+                        LIMIT 100
+                        """,
+                        (run_id, last_seq),
+                    ).fetchall()
+
+                if rows:
+                    for row in rows:
+                        last_seq = int(row["seq"])
+                        payload = {
+                            "seq": last_seq,
+                            "type": row["event_type"],
+                            "run_id": row["run_id"],
+                            "step_id": row["step_id"],
+                            "data": json.loads(row["data_json"]) if row["data_json"] else {},
+                        }
+                        yield f"id: {last_seq}\n"
+                        yield f"data: {json.dumps(payload)}\n\n"
+
+                        # Stop streaming when run completes or fails
+                        if row["event_type"] in ("run.completed", "run.failed"):
+                            return
+                else:
+                    yield ": keepalive\n\n"
+
+                await asyncio.sleep(1.0)
+
+        return StreamingResponse(generate(), media_type="text/event-stream")
 
     return app

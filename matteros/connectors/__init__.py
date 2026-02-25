@@ -43,6 +43,18 @@ def create_default_registry(
     if os.environ.get("MATTEROS_GITHUB_TOKEN"):
         registry.register(GitHubConnector())
 
+    if os.environ.get("MATTEROS_GOOGLE_TOKEN") or os.environ.get("MATTEROS_GOOGLE_CLIENT_ID"):
+        from matteros.connectors.google_auth import GoogleTokenManager
+        from matteros.connectors.google_calendar import GoogleCalendarConnector
+        google_token_mgr = GoogleTokenManager(
+            cache_path=(auth_cache_path.parent / "google_token.json") if auth_cache_path else None
+        )
+        registry.register(GoogleCalendarConnector(token_manager=google_token_mgr))
+
+    if os.environ.get("MATTEROS_TOGGL_TOKEN"):
+        from matteros.connectors.toggl import TogglConnector
+        registry.register(TogglConnector())
+
     # iCal is always available (local file parsing, no auth needed).
     registry.register(ICalConnector())
 

@@ -1,0 +1,14 @@
+[
+  {
+    "id": "cal-1",
+    "subject": "MAT-123 Strategy call",
+    "start": { "dateTime": "2026-02-20T09:00:00Z" },
+    "end": { "dateTime": "2026-02-20T09:45:00Z" }
+  },
+  {
+    "id": "cal-2",
+    "subject": "MTR-42 Draft review",
+    "start": { "dateTime": "2026-02-20T11:00:00Z" },
+    "end": { "dateTime": "2026-02-20T11:30:00Z" }
+  }
+]

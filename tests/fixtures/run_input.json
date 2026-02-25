@@ -1,0 +1,7 @@
+{
+  "date": "2026-02-20",
+  "workspace_path": "./tests/fixtures/workspace",
+  "fixtures_root": "./tests/fixtures/ms_graph",
+  "output_csv_path": "./.matteros/exports/time_entries.csv",
+  "matter_hint": ""
+}

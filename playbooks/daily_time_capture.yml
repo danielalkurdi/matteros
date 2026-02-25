@@ -1,0 +1,87 @@
+metadata:
+  name: daily_time_capture
+  description: Suggest draft time entries from Outlook, calendar, and filesystem activity.
+  version: "1.0"
+
+connectors:
+  - ms_graph_calendar
+  - ms_graph_mail
+  - filesystem
+  - csv_export
+
+inputs:
+  date: ""
+  workspace_path: ""
+  fixtures_root: ""
+  output_csv_path: ""
+  matter_hint: ""
+
+steps:
+  - id: collect_calendar
+    type: collect
+    config:
+      connector: ms_graph_calendar
+      operation: events
+      params:
+        start: "{{inputs.date}}T00:00:00Z"
+        end: "{{inputs.date}}T23:59:59Z"
+        mock_file: "{{inputs.fixtures_root}}/calendar_events.json"
+      output: calendar_events
+
+  - id: collect_emails
+    type: collect
+    config:
+      connector: ms_graph_mail
+      operation: sent_emails
+      params:
+        start: "{{inputs.date}}T00:00:00Z"
+        end: "{{inputs.date}}T23:59:59Z"
+        mock_file: "{{inputs.fixtures_root}}/sent_emails.json"
+      output: sent_emails
+
+  - id: collect_files
+    type: collect
+    config:
+      connector: filesystem
+      operation: activity_metadata
+      params:
+        root_path: "{{inputs.workspace_path}}"
+        start: "{{inputs.date}}T00:00:00Z"
+        end: "{{inputs.date}}T23:59:59Z"
+        max_files: 200
+      output: file_activity
+
+  - id: cluster_activity
+    type: transform
+    config:
+      function: cluster_activities
+      sources:
+        - calendar_events
+        - sent_emails
+        - file_activity
+      matter_hint: "{{inputs.matter_hint}}"
+      output: activity_clusters
+
+  - id: draft_entries
+    type: llm
+    config:
+      task: draft_time_entries
+      source: activity_clusters
+      schema: time_entry_suggestions.v1
+      output: time_entry_suggestions
+
+  - id: approve_entries
+    type: approve
+    config:
+      source: time_entry_suggestions
+      output: approved_time_entries
+
+  - id: apply_entries
+    type: apply
+    config:
+      connector: csv_export
+      operation: export_time_entries
+      source: approved_time_entries
+      params:
+        output_path: "{{inputs.output_csv_path}}"
+      output: apply_time_entries

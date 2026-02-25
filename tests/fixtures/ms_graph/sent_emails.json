@@ -1,0 +1,17 @@
+[
+  {
+    "id": "mail-1",
+    "subject": "Re: MAT-123 disclosure checklist",
+    "sentDateTime": "2026-02-20T10:15:00Z"
+  },
+  {
+    "id": "mail-2",
+    "subject": "Follow up MTR-42 witness meeting",
+    "sentDateTime": "2026-02-20T14:10:00Z"
+  },
+  {
+    "id": "mail-3",
+    "subject": "General client admin",
+    "sentDateTime": "2026-02-20T16:10:00Z"
+  }
+]

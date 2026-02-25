@@ -1,0 +1,4 @@
+model_provider: local
+log_level: info
+ms_graph_tenant_id: common
+ms_graph_scopes: offline_access User.Read Mail.Read Calendars.Read

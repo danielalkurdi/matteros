@@ -10,9 +10,7 @@ class Matteros < Formula
   depends_on "python@3.12"
 
   def install
-    virtualenv_create(libexec, "python3.12")
-    system libexec/"bin/pip", "install", buildpath
-    bin.install_symlink libexec/"bin/matteros"
+    virtualenv_install_with_resources(using: "python@3.12")
   end
 
   test do

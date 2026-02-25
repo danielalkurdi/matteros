@@ -12,8 +12,9 @@ from matteros.core.store import SQLiteStore
 
 
 class PatternEngine:
-    def __init__(self, store: SQLiteStore) -> None:
+    def __init__(self, store: SQLiteStore, event_bus: Any | None = None) -> None:
         self.store = store
+        self._event_bus = event_bus
 
     def learn_from_approvals(self, run_id: str) -> list[dict]:
         """Load all approvals for a run, analyze patterns, and store them.
@@ -342,7 +343,7 @@ class PatternEngine:
                 )
             conn.commit()
 
-        return {
+        result = {
             "id": pattern_id,
             "pattern_type": pattern_type,
             "matter_id": matter_id,
@@ -352,6 +353,21 @@ class PatternEngine:
             "created_at": now,
             "updated_at": now,
         }
+
+        if self._event_bus is not None:
+            try:
+                from matteros.core.events import EventType, RunEvent
+
+                self._event_bus.emit(RunEvent(
+                    event_type=EventType.PATTERN_LEARNED,
+                    run_id="",
+                    actor="system",
+                    data={"pattern_id": pattern_id, "pattern_type": pattern_type},
+                ))
+            except Exception:
+                pass  # event emission is advisory
+
+        return result
 
     def _extract_keywords(self, items: list[dict]) -> list[str]:
         """Extract recurring keywords from entry narratives."""

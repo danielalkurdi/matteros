@@ -50,4 +50,10 @@
         {% endfor %}
     </tbody>
 </table>
+
+{% if run.status == "running" %}
+<div hx-ext="sse" sse-connect="/runs/{{ run.id }}/live" sse-swap="message" hx-swap="beforeend" id="live-run-events" style="margin-top:1rem;">
+    <p style="color:var(--muted); font-size:0.8rem">Listening for live updates...</p>
+</div>
+{% endif %}
 {% endblock %}

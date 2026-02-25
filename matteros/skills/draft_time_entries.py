@@ -186,6 +186,47 @@ def flatten_activity_inputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
+    for event in payload.get("google_calendar_events", []):
+        summary = str(event.get("summary", "Google Calendar event"))
+        start_obj = event.get("start", {})
+        end_obj = event.get("end", {})
+        start_value = start_obj.get("dateTime") or start_obj.get("date")
+        end_value = end_obj.get("dateTime") or end_obj.get("date")
+        start_dt = parse_iso(start_value)
+        end_dt = parse_iso(end_value)
+        duration = 30
+        if start_dt and end_dt and end_dt > start_dt:
+            duration = max(6, int((end_dt - start_dt).total_seconds() // 60))
+        inferred = infer_matter_id([summary, matter_hint], fallback="UNASSIGNED")
+        normalized.append(
+            {
+                "kind": "calendar",
+                "title": summary,
+                "duration_minutes": duration,
+                "timestamp": start_dt.isoformat() if start_dt else None,
+                "matter_id": inferred,
+                "evidence_ref": str(event.get("id", f"gcal:{len(normalized)}")),
+            }
+        )
+
+    for entry in payload.get("toggl_entries", []):
+        description = str(entry.get("description", "Toggl time entry"))
+        seconds = int(entry.get("duration", 0))
+        duration = max(1, abs(seconds) // 60) if seconds else 6
+        start_value = entry.get("start")
+        start_dt = parse_iso(str(start_value)) if start_value else None
+        inferred = infer_matter_id([description, matter_hint], fallback="UNASSIGNED")
+        normalized.append(
+            {
+                "kind": "time_entry",
+                "title": description[:120],
+                "duration_minutes": duration,
+                "timestamp": start_dt.isoformat() if start_dt else None,
+                "matter_id": inferred,
+                "evidence_ref": str(entry.get("id", f"toggl:{len(normalized)}")),
+            }
+        )
+
     for event in payload.get("ical_events", []):
         summary = str(event.get("summary", "Calendar event"))
         start_dt = parse_iso(str(event.get("dtstart", "")))

@@ -18,8 +18,9 @@ class DraftManager:
     and queued for user review via TUI or CLI.
     """
 
-    def __init__(self, store: SQLiteStore) -> None:
+    def __init__(self, store: SQLiteStore, event_bus: Any | None = None) -> None:
         self.store = store
+        self._event_bus = event_bus
 
     def create_draft(
         self,
@@ -47,6 +48,20 @@ class DraftManager:
                 ),
             )
             conn.commit()
+
+        if self._event_bus is not None:
+            try:
+                from matteros.core.events import EventType, RunEvent
+
+                self._event_bus.emit(RunEvent(
+                    event_type=EventType.DRAFT_CREATED,
+                    run_id=run_id,
+                    actor="system",
+                    data={"draft_id": draft_id},
+                ))
+            except Exception:
+                pass  # event emission is advisory
+
         return draft_id
 
     def list_drafts(

@@ -16,6 +16,7 @@ from matteros.llm.errors import (
     LLMTimeoutError,
 )
 from matteros.llm.json_utils import parse_json_object
+from matteros.llm.tasks import get_registry
 
 
 class OpenAIProvider:
@@ -31,10 +32,13 @@ class OpenAIProvider:
         if not api_key:
             raise LLMConfigurationError("OPENAI_API_KEY is not configured")
 
-        if task != "draft_time_entries":
-            raise LLMConfigurationError(f"unsupported openai task: {task}")
-        if not schema_name:
-            raise LLMConfigurationError("schema_name is required for openai structured output")
+        try:
+            spec = get_registry().get(task)
+        except KeyError as exc:
+            raise LLMConfigurationError(str(exc)) from exc
+
+        if spec.schema_name and not schema_name:
+            raise LLMConfigurationError(f"schema_name is required for task '{task}'")
 
         request_payload = self._build_request_payload(task=task, payload=payload, schema_name=schema_name)
         response = self._post_json(
@@ -54,39 +58,41 @@ class OpenAIProvider:
         *,
         task: str,
         payload: dict[str, Any],
-        schema_name: str,
+        schema_name: str | None,
     ) -> dict[str, Any]:
-        response_schema = schema_json(schema_name)
+        spec = get_registry().get(task)
 
-        return {
+        user_content = spec.user_prompt_template.replace(
+            "{{payload}}", json.dumps(payload, ensure_ascii=True, sort_keys=True)
+        )
+
+        request: dict[str, Any] = {
             "model": self.model_name,
             "temperature": 0,
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You are a legal ops assistant. Return only valid JSON that matches the schema. "
-                        "Do not include markdown or explanatory text."
-                    ),
+                    "content": spec.system_prompt,
                 },
                 {
                     "role": "user",
-                    "content": (
-                        f"Task: {task}\n"
-                        "Payload:\n"
-                        f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
-                    ),
+                    "content": user_content,
                 },
             ],
-            "response_format": {
+        }
+
+        if schema_name:
+            response_schema = schema_json(schema_name)
+            request["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "matteros_structured_output",
                     "strict": True,
                     "schema": response_schema,
                 },
-            },
-        }
+            }
+
+        return request
 
     def _post_json(self, *, path: str, body: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         url = f"{self.base_url}{path}"

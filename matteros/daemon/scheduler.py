@@ -46,7 +46,7 @@ class PlaybookScheduler:
         self._home = home
         self._event_bus = event_bus
         self._store = SQLiteStore(home / "matteros.db")
-        self._draft_manager = DraftManager(self._store)
+        self._draft_manager = DraftManager(self._store, event_bus=event_bus)
         self._jobs: dict[str, _Job] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._running = False

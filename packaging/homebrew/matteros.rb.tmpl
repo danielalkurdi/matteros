@@ -1,0 +1,21 @@
+class Matteros < Formula
+  include Language::Python::Virtualenv
+
+  desc "CLI-first legal ops orchestration with safe, auditable workflows"
+  homepage "https://github.com/danielalkurdi/matteros"
+  url "https://github.com/danielalkurdi/matteros/releases/download/__TAG__/matteros-__VERSION__.tar.gz"
+  sha256 "__SHA256__"
+  license "AGPL-3.0-only"
+
+  depends_on "python@3.12"
+
+  def install
+    virtualenv_create(libexec, "python3.12")
+    system libexec/"bin/pip", "install", buildpath
+    bin.install_symlink libexec/"bin/matteros"
+  end
+
+  test do
+    assert_match "MatterOS", shell_output("#{bin}/matteros --help")
+  end
+end

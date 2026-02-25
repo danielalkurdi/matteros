@@ -18,6 +18,8 @@ class LLMAdapter:
         self,
         default_provider: str | None = None,
         *,
+        allow_remote_models: bool | None = None,
+        model_allowlist: Sequence[str] | None = None,
         max_retries: int | None = None,
         retry_backoff_seconds: float | None = None,
     ):
@@ -33,8 +35,16 @@ class LLMAdapter:
             if retry_backoff_seconds is not None
             else float(os.getenv("MATTEROS_LLM_RETRY_BACKOFF_SECONDS", "0.5"))
         )
-        self.allow_remote_models = _truthy(os.getenv("MATTEROS_ALLOW_REMOTE_MODELS", "false"))
-        self.model_allowlist = _split_csv(os.getenv("MATTEROS_LLM_MODEL_ALLOWLIST"))
+        self.allow_remote_models = (
+            allow_remote_models
+            if allow_remote_models is not None
+            else _truthy(os.getenv("MATTEROS_ALLOW_REMOTE_MODELS", "false"))
+        )
+        self.model_allowlist = (
+            list(model_allowlist)
+            if model_allowlist is not None
+            else list(_split_csv(os.getenv("MATTEROS_LLM_MODEL_ALLOWLIST")))
+        )
 
     def run(
         self,

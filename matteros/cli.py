@@ -12,6 +12,14 @@ from pydantic import ValidationError
 from matteros.connectors import create_default_registry
 from matteros.connectors.ms_graph_auth import DEFAULT_SCOPES, MicrosoftGraphTokenManager
 from matteros.core.audit import AuditLogger
+from matteros.core.config import (
+    MatterOSConfig,
+    backup_legacy_config,
+    default_config,
+    load_config,
+    save_config_atomic,
+)
+from matteros.core.onboarding import build_onboarding_status, ensure_home_scaffold, smoke_test_dry_run
 from matteros.core.playbook import PlaybookError, load_playbook
 from matteros.core.policy import PolicyEngine
 from matteros.core.runner import RunnerOptions, WorkflowRunner
@@ -25,12 +33,14 @@ playbooks_app = typer.Typer(help="Inspect playbooks")
 audit_app = typer.Typer(help="Inspect audit logs")
 auth_app = typer.Typer(help="Manage authentication")
 llm_app = typer.Typer(help="Inspect LLM runtime configuration")
+onboard_app = typer.Typer(help="Guided onboarding and readiness checks")
 
 app.add_typer(connectors_app, name="connectors")
 app.add_typer(playbooks_app, name="playbooks")
 app.add_typer(audit_app, name="audit")
 app.add_typer(auth_app, name="auth")
 app.add_typer(llm_app, name="llm")
+app.add_typer(onboard_app, name="onboard")
 
 
 def resolve_home(home: Path | None) -> Path:
@@ -40,12 +50,19 @@ def resolve_home(home: Path | None) -> Path:
 
 
 def build_runner(home: Path) -> WorkflowRunner:
+    loaded = load_config(path=home / "config.yml", home=home)
+    cfg = loaded.config
+
     store = SQLiteStore(home / "matteros.db")
     audit = AuditLogger(store, home / "audit" / "events.jsonl")
     return WorkflowRunner(
         store=store,
         connectors=create_default_registry(auth_cache_path=home / "auth" / "ms_graph_token.json"),
-        llm=LLMAdapter(),
+        llm=LLMAdapter(
+            default_provider=cfg.llm.provider,
+            allow_remote_models=cfg.llm.remote_enabled,
+            model_allowlist=cfg.llm.model_allowlist,
+        ),
         audit=audit,
         policy=PolicyEngine(),
     )
@@ -70,35 +87,17 @@ def build_ms_graph_token_manager(
 def init_command(home: Path | None = typer.Option(None, help="MatterOS home directory")) -> None:
     """Create runtime directories, sqlite db, and an example playbook."""
     home_dir = resolve_home(home)
-    home_dir.mkdir(parents=True, exist_ok=True)
-
+    paths = ensure_home_scaffold(home=home_dir)
     SQLiteStore(home_dir / "matteros.db")
-    (home_dir / "audit").mkdir(parents=True, exist_ok=True)
-    (home_dir / "auth").mkdir(parents=True, exist_ok=True)
 
     config_path = home_dir / "config.yml"
     if not config_path.exists():
-        config_path.write_text(
-            """model_provider: local
-log_level: info
-ms_graph_tenant_id: common
-ms_graph_scopes: offline_access User.Read Mail.Read Calendars.Read
-""",
-            encoding="utf-8",
-        )
-
-    playbooks_dir = Path("playbooks")
-    playbooks_dir.mkdir(parents=True, exist_ok=True)
-    sample_path = playbooks_dir / "daily_time_capture.yml"
-    if not sample_path.exists():
-        sample_payload = (Path(__file__).resolve().parent / "playbooks" / "daily_time_capture.yml").read_text(
-            encoding="utf-8"
-        )
-        sample_path.write_text(sample_payload, encoding="utf-8")
+        cfg = default_config(home=home_dir)
+        save_config_atomic(config=cfg, path=config_path)
 
     typer.echo(f"initialized MatterOS home: {home_dir}")
     typer.echo(f"sqlite db: {home_dir / 'matteros.db'}")
-    typer.echo(f"example playbook: {sample_path}")
+    typer.echo(f"example playbook: {paths['sample_playbook']}")
 
 
 @connectors_app.command("list")
@@ -193,6 +192,240 @@ def auth_logout(
     typer.echo(f"removed cached token: {manager.cache_path}")
 
 
+@onboard_app.callback(invoke_without_command=True)
+def onboard(
+    ctx: typer.Context,
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Run without prompts; fail if required inputs are missing",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Accept safe defaults and create missing directories",
+    ),
+    profile: str = typer.Option("default", "--profile", help="Profile name to store"),
+    workspace_path: Path | None = typer.Option(
+        None,
+        "--workspace-path",
+        help="Workspace directory used for onboarding smoke run",
+    ),
+    default_playbook: Path | None = typer.Option(
+        None,
+        "--default-playbook",
+        help="Default playbook path to persist in config",
+    ),
+    skip_auth: bool = typer.Option(
+        False,
+        "--skip-auth",
+        help="Skip Microsoft auth login during onboarding",
+    ),
+    skip_smoke_test: bool = typer.Option(
+        False,
+        "--skip-smoke-test",
+        help="Skip dry-run smoke test",
+    ),
+    dry_run_only: bool = typer.Option(
+        False,
+        "--dry-run-only",
+        help="Force dry-run smoke behavior (default behavior)",
+    ),
+    tenant_id: str | None = typer.Option(
+        None,
+        "--tenant-id",
+        help="Microsoft Entra tenant id override",
+    ),
+    scopes: str | None = typer.Option(
+        None,
+        "--scopes",
+        help="Microsoft OAuth scopes override",
+    ),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Guided first-run setup. Use `matteros onboard status` for readiness."""
+    if ctx.invoked_subcommand:
+        return
+
+    home_dir = resolve_home(home)
+    paths = ensure_home_scaffold(home=home_dir)
+    SQLiteStore(home_dir / "matteros.db")
+
+    config_path = home_dir / "config.yml"
+    loaded = load_config(path=config_path, home=home_dir)
+    cfg = loaded.config
+
+    if loaded.migrated and loaded.existed and config_path.exists():
+        backup_path = backup_legacy_config(config_path=config_path)
+        typer.echo(f"migrated legacy config; backup saved at {backup_path}")
+
+    if loaded.existed and not non_interactive and not yes:
+        if not typer.confirm("Existing config detected. Update it?", default=True):
+            typer.echo("onboarding aborted")
+            raise typer.Exit(code=0)
+
+    cfg.profile.name = profile
+
+    configured_workspace = _resolve_workspace_path(
+        workspace_path=workspace_path,
+        current_value=cfg.paths.workspace_path,
+        non_interactive=non_interactive,
+        yes=yes,
+    )
+    cfg.paths.workspace_path = str(configured_workspace)
+
+    configured_playbook = _resolve_playbook_path(
+        playbook_path=default_playbook,
+        current_value=cfg.paths.default_playbook,
+        sample_playbook=paths["sample_playbook"],
+        non_interactive=non_interactive,
+        yes=yes,
+    )
+    cfg.paths.default_playbook = str(configured_playbook)
+    cfg.paths.fixtures_root = str(paths["fixtures_dir"])
+
+    _configure_llm_section(cfg=cfg, non_interactive=non_interactive, yes=yes)
+
+    if tenant_id:
+        cfg.ms_graph.tenant_id = tenant_id
+    if scopes:
+        cfg.ms_graph.scopes = scopes
+
+    manager = build_ms_graph_token_manager(
+        home=home_dir,
+        tenant_id=cfg.ms_graph.tenant_id,
+        scopes=cfg.ms_graph.scopes,
+    )
+    auth_status = manager.cache_status()
+    auth_state = str(auth_status.get("status"))
+
+    if skip_auth:
+        cfg.ms_graph.auth_pending = True
+        typer.echo("auth step skipped (--skip-auth); status marked pending")
+    elif auth_state == "valid":
+        cfg.ms_graph.auth_pending = False
+        typer.echo("microsoft auth token is already valid")
+    elif non_interactive:
+        cfg.ms_graph.auth_pending = True
+        typer.echo("microsoft auth token missing/expired; status marked pending (non-interactive)")
+    else:
+        prompt = "Microsoft token missing/expired. Run device-code login now?"
+        if yes or typer.confirm(prompt, default=True):
+            try:
+                manager.login_device_code(print_fn=typer.echo)
+                cfg.ms_graph.auth_pending = False
+            except Exception as exc:
+                cfg.ms_graph.auth_pending = True
+                typer.echo(f"auth login failed during onboarding: {exc}")
+        else:
+            cfg.ms_graph.auth_pending = True
+
+    save_config_atomic(config=cfg, path=config_path)
+
+    smoke_status = "skipped"
+    smoke_run_id: str | None = None
+    smoke_error: str | None = None
+
+    if not skip_smoke_test:
+        if dry_run_only:
+            typer.echo("dry-run-only mode enabled")
+        runner = build_runner(home_dir)
+        audit = AuditLogger(SQLiteStore(home_dir / "matteros.db"), home_dir / "audit" / "events.jsonl")
+        summary, verify, error = smoke_test_dry_run(
+            runner=runner,
+            audit=audit,
+            playbook_path=Path(cfg.paths.default_playbook),
+            workspace_path=Path(cfg.paths.workspace_path),
+            fixtures_root=Path(cfg.paths.fixtures_root or paths["fixtures_dir"]),
+            output_csv_path=paths["exports_dir"] / "onboard_time_entries.csv",
+            reviewer="onboard",
+        )
+        if error:
+            smoke_status = "failed"
+            smoke_error = error
+        else:
+            smoke_status = "passed"
+            smoke_run_id = summary.run_id if summary else None
+            if verify:
+                typer.echo(
+                    f"smoke test audit verified: run={verify.run_id} events={verify.checked_events}"
+                )
+
+    cfg.onboarding.completed_at = datetime.now(UTC).isoformat()
+    cfg.onboarding.last_smoke_test_status = smoke_status
+    cfg.onboarding.last_smoke_test_run_id = smoke_run_id
+    save_config_atomic(config=cfg, path=config_path)
+
+    typer.echo("onboarding complete")
+    typer.echo(f"home: {home_dir}")
+    typer.echo(f"profile: {cfg.profile.name}")
+    typer.echo(f"default_playbook: {cfg.paths.default_playbook}")
+    typer.echo(f"workspace_path: {cfg.paths.workspace_path}")
+    typer.echo(f"auth_pending: {cfg.ms_graph.auth_pending}")
+    typer.echo(f"smoke_test: {smoke_status}")
+    if smoke_run_id:
+        typer.echo(f"smoke_run_id: {smoke_run_id}")
+
+    if smoke_error:
+        typer.echo(f"smoke_error: {smoke_error}")
+        raise typer.Exit(code=1)
+
+
+@onboard_app.command("status")
+def onboard_status(
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Show onboarding readiness matrix."""
+    home_dir = resolve_home(home)
+    config_path = home_dir / "config.yml"
+    loaded = load_config(path=config_path, home=home_dir)
+    cfg = loaded.config
+
+    manager = build_ms_graph_token_manager(
+        home=home_dir,
+        tenant_id=cfg.ms_graph.tenant_id,
+        scopes=cfg.ms_graph.scopes,
+    )
+    auth_state = str(manager.cache_status().get("status"))
+    auth_ready = auth_state == "valid" and not cfg.ms_graph.auth_pending
+
+    adapter = LLMAdapter(
+        default_provider=cfg.llm.provider,
+        allow_remote_models=cfg.llm.remote_enabled,
+        model_allowlist=cfg.llm.model_allowlist,
+    )
+    _, llm_findings = _llm_findings(
+        adapter=adapter,
+        provider_name=cfg.llm.provider,
+    )
+    llm_ready = len(llm_findings) == 0
+
+    status = build_onboarding_status(
+        config_present=config_path.exists(),
+        auth_ready=auth_ready,
+        llm_ready=llm_ready,
+        playbook_path=Path(cfg.paths.default_playbook),
+        smoke_status=cfg.onboarding.last_smoke_test_status,
+        smoke_run_id=cfg.onboarding.last_smoke_test_run_id,
+    )
+
+    typer.echo(f"config_present: {status.config_present}")
+    typer.echo(f"auth_ready: {status.auth_ready}")
+    typer.echo(f"llm_ready: {status.llm_ready}")
+    typer.echo(f"playbook_ready: {status.playbook_ready}")
+    typer.echo(f"smoke_test_passed: {status.smoke_test_passed}")
+    typer.echo(f"details: {json.dumps(status.details, sort_keys=True)}")
+
+    if not (
+        status.config_present
+        and status.auth_ready
+        and status.llm_ready
+        and status.playbook_ready
+        and status.smoke_test_passed
+    ):
+        raise typer.Exit(code=1)
+
+
 @llm_app.command("doctor")
 def llm_doctor(
     provider: str | None = typer.Option(
@@ -200,37 +433,45 @@ def llm_doctor(
         "--provider",
         help="Provider override for check: local|openai|anthropic",
     ),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
 ) -> None:
     """Validate LLM provider configuration and policy controls."""
-    adapter = LLMAdapter(default_provider=provider) if provider else LLMAdapter()
-    selected_provider = provider or adapter.default_provider
+    home_dir = resolve_home(home)
+    loaded = load_config(path=home_dir / "config.yml", home=home_dir)
+    cfg = loaded.config if loaded.existed else None
+
+    env_provider = os.getenv("MATTEROS_MODEL_PROVIDER")
+
+    if provider:
+        if cfg is None:
+            adapter = LLMAdapter(default_provider=provider)
+        else:
+            adapter = LLMAdapter(
+                default_provider=provider,
+                allow_remote_models=cfg.llm.remote_enabled,
+                model_allowlist=cfg.llm.model_allowlist,
+            )
+        selected_provider = provider
+    elif env_provider:
+        adapter = LLMAdapter(default_provider=env_provider)
+        selected_provider = env_provider
+    elif cfg is None:
+        adapter = LLMAdapter()
+        selected_provider = adapter.default_provider
+    else:
+        selected_provider = cfg.llm.provider
+        adapter = LLMAdapter(
+            default_provider=selected_provider,
+            allow_remote_models=cfg.llm.remote_enabled,
+            model_allowlist=cfg.llm.model_allowlist,
+        )
+
     provider_instance = adapter.providers.get(selected_provider)
     if provider_instance is None:
         typer.echo(f"llm doctor: FAILED - unknown provider '{selected_provider}'")
         raise typer.Exit(code=1)
 
-    model_name = _llm_model_name(provider_instance)
-    findings: list[str] = []
-
-    if selected_provider != "local" and not adapter.allow_remote_models:
-        findings.append(
-            "remote providers are disabled; set MATTEROS_ALLOW_REMOTE_MODELS=true"
-        )
-
-    if selected_provider == "openai" and not os.getenv("OPENAI_API_KEY"):
-        findings.append("OPENAI_API_KEY is not configured")
-
-    if selected_provider == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
-        findings.append("ANTHROPIC_API_KEY is not configured")
-
-    if (
-        selected_provider != "local"
-        and adapter.model_allowlist
-        and model_name not in adapter.model_allowlist
-    ):
-        findings.append(
-            f"model '{model_name}' is not allowed by MATTEROS_LLM_MODEL_ALLOWLIST"
-        )
+    model_name, findings = _llm_findings(adapter=adapter, provider_name=selected_provider)
 
     typer.echo(f"provider: {selected_provider}")
     typer.echo(f"model: {model_name}")
@@ -508,6 +749,114 @@ def _approval_handler_from_file(path: Path):
             raise typer.BadParameter(str(exc)) from exc
 
     return handler
+
+
+def _resolve_workspace_path(
+    *,
+    workspace_path: Path | None,
+    current_value: str,
+    non_interactive: bool,
+    yes: bool,
+) -> Path:
+    selected = workspace_path.expanduser().resolve() if workspace_path else Path(current_value).expanduser().resolve()
+    if selected.exists() and selected.is_dir():
+        return selected
+
+    if non_interactive and not yes:
+        raise typer.BadParameter(
+            f"workspace path does not exist: {selected} (use --yes to create it)"
+        )
+
+    if yes or typer.confirm(f"Workspace path {selected} does not exist. Create it?", default=True):
+        selected.mkdir(parents=True, exist_ok=True)
+        return selected
+
+    raise typer.BadParameter(f"workspace path does not exist: {selected}")
+
+
+def _resolve_playbook_path(
+    *,
+    playbook_path: Path | None,
+    current_value: str,
+    sample_playbook: Path,
+    non_interactive: bool,
+    yes: bool,
+) -> Path:
+    selected = playbook_path.expanduser().resolve() if playbook_path else Path(current_value).expanduser().resolve()
+    if selected.exists() and selected.is_file():
+        return selected
+
+    if selected == sample_playbook:
+        return sample_playbook
+
+    if non_interactive:
+        if yes:
+            return sample_playbook
+        raise typer.BadParameter(f"default playbook not found: {selected}")
+
+    if yes or typer.confirm(
+        f"Playbook {selected} was not found. Use sample playbook {sample_playbook}?",
+        default=True,
+    ):
+        return sample_playbook
+
+    raise typer.BadParameter(f"default playbook not found: {selected}")
+
+
+def _configure_llm_section(
+    *,
+    cfg: MatterOSConfig,
+    non_interactive: bool,
+    yes: bool,
+) -> None:
+    if non_interactive:
+        if cfg.llm.provider not in {"local", "openai", "anthropic"}:
+            cfg.llm.provider = "local"
+            cfg.llm.remote_enabled = False
+        return
+
+    if yes:
+        return
+
+    remote_enabled = typer.confirm(
+        "Enable remote LLM providers (OpenAI/Anthropic)?",
+        default=cfg.llm.remote_enabled,
+    )
+    cfg.llm.remote_enabled = remote_enabled
+    if not remote_enabled:
+        cfg.llm.provider = "local"
+        return
+
+    provider = typer.prompt(
+        "Remote provider (openai/anthropic)",
+        default=cfg.llm.provider if cfg.llm.provider in {"openai", "anthropic"} else "openai",
+    ).strip().lower()
+    if provider not in {"openai", "anthropic"}:
+        raise typer.BadParameter("provider must be openai or anthropic")
+    cfg.llm.provider = provider
+
+
+def _llm_findings(*, adapter: LLMAdapter, provider_name: str) -> tuple[str, list[str]]:
+    provider_instance = adapter.providers.get(provider_name)
+    if provider_instance is None:
+        return "unknown", [f"unknown provider '{provider_name}'"]
+
+    model_name = _llm_model_name(provider_instance)
+    findings: list[str] = []
+
+    if provider_name != "local" and not adapter.allow_remote_models:
+        findings.append("remote providers are disabled; set MATTEROS_ALLOW_REMOTE_MODELS=true")
+
+    if provider_name == "openai" and not os.getenv("OPENAI_API_KEY"):
+        findings.append("OPENAI_API_KEY is not configured")
+
+    if provider_name == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
+        findings.append("ANTHROPIC_API_KEY is not configured")
+
+    if provider_name != "local" and adapter.model_allowlist and model_name not in adapter.model_allowlist:
+        findings.append(f"model '{model_name}' is not allowed by MATTEROS_LLM_MODEL_ALLOWLIST")
+
+    return model_name, findings
 
 
 def _llm_model_name(provider_instance: Any) -> str:

@@ -8,6 +8,21 @@ MVP focus:
 - Human approval before side effects
 - Immutable audit log for defensibility
 
+## Install (Homebrew first)
+
+```bash
+brew tap danielalkurdi/matteros
+brew install matteros
+```
+
+Python fallback:
+
+```bash
+pipx install git+https://github.com/danielalkurdi/matteros.git
+```
+
+See [docs/INSTALL.md](./docs/INSTALL.md) for additional installation notes.
+
 ## Quick start
 
 ```bash
@@ -16,12 +31,33 @@ source .venv/bin/activate
 pip install -e .[dev]
 
 matteros init
+matteros onboard
 matteros auth login --client-id <your-app-client-id>
 matteros llm doctor
 matteros connectors list
 matteros playbooks list
 matteros run matteros/playbooks/daily_time_capture.yml --dry-run --input tests/fixtures/run_input.json
 matteros audit verify --run-id <RUN_ID> --source both
+```
+
+## Onboarding
+
+Guided setup:
+
+```bash
+matteros onboard
+```
+
+Non-interactive setup for CI/devcontainers:
+
+```bash
+matteros onboard --non-interactive --yes --skip-auth
+```
+
+Readiness status:
+
+```bash
+matteros onboard status
 ```
 
 ## Audit verification

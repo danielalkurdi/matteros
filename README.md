@@ -32,7 +32,7 @@ Legal work is fragmented across inboxes, calendars, documents, and matter system
 
 ```bash
 brew tap danielalkurdi/matteros
-brew install matteros
+brew install danielalkurdi/matteros/matteros
 ```
 
 ### Source install (recommended for full feature set)

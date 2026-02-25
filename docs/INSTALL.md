@@ -10,7 +10,7 @@ This guide gives you three install paths:
 
 ```bash
 brew tap danielalkurdi/matteros
-brew install matteros
+brew install danielalkurdi/matteros/matteros
 ```
 
 Then initialize:

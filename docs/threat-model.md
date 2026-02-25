@@ -1,29 +1,40 @@
-# Threat Model (MVP)
+# Threat Model (Current)
 
 ## Assets
 
 - Matter metadata and activity timelines
-- Draft billing narratives
-- Approval decisions and audit logs
+- Draft time entries and narratives
+- Approval decisions and reviewer actions
+- Audit trail integrity (SQLite + JSONL)
+- OAuth credentials and API tokens
 
 ## Trust boundaries
 
-- Local CLI runtime
-- External Microsoft Graph API
-- Local filesystem scanner
-- Optional external LLM providers
+- Local MatterOS runtime (CLI/TUI/Web/daemon)
+- Connector boundaries (Microsoft Graph, Slack, Jira, GitHub, filesystem, iCal)
+- Optional remote LLM providers
+- Plugin connector loading path (`~/.matteros/plugins` / `<home>/plugins`)
 
 ## Primary threats
 
-- Prompt injection via email/document text
-- Over-privileged connectors causing unauthorized writes
-- Tampering with run history or approvals
-- Data exfiltration via accidental provider defaults
+- Prompt injection via emails/docs/calendar text
+- Over-privileged or malicious connector/plugin behavior
+- Unauthorized writes without operator review
+- Audit trail tampering or replay gaps
+- Token leakage from mis-handled web bootstrap links
 
-## MVP mitigations
+## Mitigations in place
 
-- Untrusted connector payloads handled as data channel only
-- Connector manifests with explicit read/write operations
-- Side effects constrained to `apply` steps after approval
-- Audit events hash-chained and append-only
-- Local provider default; cloud providers are opt-in
+- Connector manifests with explicit operation permissions
+- Policy checks for connector declarations + operation validity
+- Side effects constrained to `apply` steps with approval gating
+- Audit events hash-chained and verifiable by CLI
+- Local provider default; remote providers require explicit opt-in
+- Web middleware requires token-based access
+- Plugin ID collision prevention at registry time
+
+## Residual risks
+
+- Local plugin code runs with process privileges if loaded
+- Operator error in approving low-quality suggestions
+- Secret management remains environment/config dependent

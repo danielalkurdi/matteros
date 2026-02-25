@@ -1,31 +1,105 @@
-# Connector Specifications (MVP)
+# Connector Specifications
 
-## ms_graph_mail
+MatterOS connectors expose a manifest with:
 
-- Mode: read
-- Operation: `sent_emails`
-- Required params: optional `start`, `end`, or `mock_file`
-- Output: list of sent-message metadata
-- Auth: bearer token from `MATTEROS_MS_GRAPH_TOKEN` or cached OAuth token (`matteros auth login`)
+- `connector_id`
+- `default_mode` (`read` or `write`)
+- operation map (`operation -> mode`)
 
-## ms_graph_calendar
+Use this to inspect your active registry at runtime:
 
-- Mode: read
-- Operation: `events`
-- Required params: `start`, `end` or `mock_file`
-- Output: list of calendar event metadata
-- Auth: bearer token from `MATTEROS_MS_GRAPH_TOKEN` or cached OAuth token (`matteros auth login`)
+```bash
+matteros connectors list
+```
 
-## filesystem
+## Core connectors
 
-- Mode: read
-- Operation: `activity_metadata`
-- Required params: `root_path`
-- Output: list of file metadata records
+### `ms_graph_mail`
 
-## csv_export
+- Default mode: `read`
+- Operations:
+  - `sent_emails` (`read`)
+- Typical params:
+  - `start`, `end` (ISO datetimes)
+  - optional `mock_file`
+- Auth:
+  - OAuth device-code token cache (`matteros auth login`)
 
-- Mode: write
-- Operation: `export_time_entries`
-- Required params: `output_path`
-- Output: write summary (`rows_written`, `output_path`)
+### `ms_graph_calendar`
+
+- Default mode: `read`
+- Operations:
+  - `events` (`read`)
+- Typical params:
+  - `start`, `end` (ISO datetimes)
+  - optional `mock_file`
+- Auth:
+  - OAuth device-code token cache (`matteros auth login`)
+
+### `filesystem`
+
+- Default mode: `read`
+- Operations:
+  - `activity_metadata` (`read`)
+- Typical params:
+  - `root_path`
+  - optional `start`, `end`, `max_files`
+
+### `csv_export`
+
+- Default mode: `write`
+- Operations:
+  - `export_time_entries` (`write`)
+- Typical params:
+  - `output_path`
+
+## Optional built-in connectors
+
+These are registered when required env vars are present.
+
+### `slack`
+
+- Default mode: `read`
+- Operations:
+  - `messages` (`read`)
+  - `post_summary` (`write`)
+- Env:
+  - `MATTEROS_SLACK_TOKEN`
+
+### `jira`
+
+- Default mode: `read`
+- Operations:
+  - `worklogs` (`read`)
+  - `issues` (`read`)
+  - `log_time` (`write`)
+- Env:
+  - `MATTEROS_JIRA_TOKEN`
+  - `MATTEROS_JIRA_URL`
+
+### `github`
+
+- Default mode: `read`
+- Operations:
+  - `commits` (`read`)
+  - `prs` (`read`)
+- Env:
+  - `MATTEROS_GITHUB_TOKEN`
+
+### `ical`
+
+- Default mode: `read`
+- Operations:
+  - `events` (`read`)
+- No auth required (local `.ics` parsing)
+
+## Plugin connectors
+
+MatterOS can load custom connectors from:
+
+- installed Python entry points (`matteros.connectors`)
+- local plugin files/packages in `~/.matteros/plugins` (or `<home>/plugins`)
+
+Plugin connectors must provide a valid `Connector` implementation and manifest.
+
+At startup, plugins are discovered and registered unless their `connector_id` conflicts with an already-registered connector.

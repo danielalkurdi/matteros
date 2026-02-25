@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Audit Log{% endblock %}
+{% block content %}
+<h2>Audit Log</h2>
+<div style="margin-bottom: 1rem;">
+    <input type="text" id="audit-filter" placeholder="Filter by event type, run ID..." oninput="filterAudit()" style="width: 300px;">
+</div>
+<table id="audit-table">
+    <thead>
+        <tr><th>Seq</th><th>Run ID</th><th>Type</th><th>Actor</th><th>Step</th><th>Timestamp</th><th>Hash</th></tr>
+    </thead>
+    <tbody>
+        {% for event in events %}
+        <tr class="audit-row" data-search="{{ event.event_type }} {{ event.run_id }} {{ event.step_id or '' }} {{ event.actor }}">
+            <td>{{ event.seq }}</td>
+            <td><a href="/runs/{{ event.run_id }}" style="color: var(--accent)">{{ event.run_id[:8] }}</a></td>
+            <td>{{ event.event_type }}</td>
+            <td>{{ event.actor }}</td>
+            <td>{{ event.step_id or "-" }}</td>
+            <td>{{ event.timestamp[:19] }}</td>
+            <td style="color: var(--muted)">{{ event.event_hash[:12] }}...</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+<script>
+function filterAudit() {
+    const q = document.getElementById('audit-filter').value.toLowerCase();
+    document.querySelectorAll('.audit-row').forEach(row => {
+        row.style.display = row.dataset.search.toLowerCase().includes(q) ? '' : 'none';
+    });
+}
+</script>
+{% endblock %}

@@ -3,11 +3,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
 
 from matteros.connectors.base import ConnectorRegistry
 from matteros.core.approvals import ApprovalHandler
 from matteros.core.audit import AuditLogger
+from matteros.core.events import EventBus, EventType, RunEvent
 from matteros.core.policy import PolicyEngine
 from matteros.core.schemas import normalize_named_schema
 from matteros.core.store import SQLiteStore
@@ -35,6 +36,13 @@ class RunnerOptions:
     approval_handler: ApprovalHandler | None = None
 
 
+# Type alias for step handler functions.
+StepHandler = Callable[
+    ["WorkflowRunner", Any, dict[str, Any], RunnerOptions, dict[str, Any], str],
+    Any,
+]
+
+
 class WorkflowRunner:
     def __init__(
         self,
@@ -44,12 +52,26 @@ class WorkflowRunner:
         llm: LLMAdapter,
         audit: AuditLogger,
         policy: PolicyEngine,
+        event_bus: EventBus | None = None,
     ):
         self.store = store
         self.connectors = connectors
         self.llm = llm
         self.audit = audit
         self.policy = policy
+        self.event_bus = event_bus
+
+        self._step_handlers: dict[StepType, StepHandler] = {
+            StepType.COLLECT: WorkflowRunner._execute_collect,
+            StepType.TRANSFORM: WorkflowRunner._execute_transform,
+            StepType.LLM: WorkflowRunner._execute_llm,
+            StepType.APPROVE: WorkflowRunner._execute_approve,
+            StepType.APPLY: WorkflowRunner._execute_apply,
+        }
+
+    def register_step_handler(self, step_type: StepType, handler: StepHandler) -> None:
+        """Register a custom step handler, replacing the default if any."""
+        self._step_handlers[step_type] = handler
 
     def run(
         self,
@@ -73,7 +95,7 @@ class WorkflowRunner:
         context: dict[str, Any] = {"inputs": inputs}
         step_results: list[StepResult] = []
 
-        self.audit.append(
+        self._audit_and_emit(
             run_id=run_id,
             event_type="run.started",
             actor=options.reviewer,
@@ -105,7 +127,7 @@ class WorkflowRunner:
                 output_payload=outputs,
                 error=None,
             )
-            self.audit.append(
+            self._audit_and_emit(
                 run_id=run_id,
                 event_type="run.completed",
                 actor="system",
@@ -127,7 +149,7 @@ class WorkflowRunner:
                 output_payload={k: v for k, v in context.items() if k != "inputs"},
                 error=str(exc),
             )
-            self.audit.append(
+            self._audit_and_emit(
                 run_id=run_id,
                 event_type="run.failed",
                 actor="system",
@@ -152,7 +174,7 @@ class WorkflowRunner:
             step_type=step.type.value,
             started_at=started_at,
         )
-        self.audit.append(
+        self._audit_and_emit(
             run_id=run_id,
             event_type="step.started",
             actor="system",
@@ -182,7 +204,7 @@ class WorkflowRunner:
                 output_payload=output,
                 error=None,
             )
-            self.audit.append(
+            self._audit_and_emit(
                 run_id=run_id,
                 event_type="step.completed",
                 actor="system",
@@ -199,7 +221,7 @@ class WorkflowRunner:
                 output_payload=None,
                 error=str(exc),
             )
-            self.audit.append(
+            self._audit_and_emit(
                 run_id=run_id,
                 event_type="step.failed",
                 actor="system",
@@ -217,17 +239,10 @@ class WorkflowRunner:
         options: RunnerOptions,
         manifests: dict[str, Any],
     ) -> Any:
-        if step.type == StepType.COLLECT:
-            return self._execute_collect(step, context, options, manifests)
-        if step.type == StepType.TRANSFORM:
-            return self._execute_transform(step, context)
-        if step.type == StepType.LLM:
-            return self._execute_llm(step, context, run_id=run_id)
-        if step.type == StepType.APPROVE:
-            return self._execute_approve(step, context, options, run_id=run_id)
-        if step.type == StepType.APPLY:
-            return self._execute_apply(step, context, options, manifests)
-        raise ValueError(f"unsupported step type: {step.type}")
+        handler = self._step_handlers.get(step.type)
+        if handler is None:
+            raise ValueError(f"unsupported step type: {step.type}")
+        return handler(self, step, context, options, manifests, run_id)
 
     def _execute_collect(
         self,
@@ -235,6 +250,7 @@ class WorkflowRunner:
         context: dict[str, Any],
         options: RunnerOptions,
         manifests: dict[str, Any],
+        run_id: str,
     ) -> Any:
         connector_id = str(step.config.get("connector", ""))
         operation = str(step.config.get("operation", ""))
@@ -253,7 +269,14 @@ class WorkflowRunner:
         result = connector.read(operation, params, context)
         return self.policy.sanitize_untrusted_data(result)
 
-    def _execute_transform(self, step: Any, context: dict[str, Any]) -> Any:
+    def _execute_transform(
+        self,
+        step: Any,
+        context: dict[str, Any],
+        options: RunnerOptions,
+        manifests: dict[str, Any],
+        run_id: str,
+    ) -> Any:
         function_name = str(step.config.get("function", "")).strip()
         if function_name != "cluster_activities":
             raise ValueError(f"unsupported transform function: {function_name}")
@@ -271,7 +294,14 @@ class WorkflowRunner:
 
         return cluster_activities(payload)
 
-    def _execute_llm(self, step: Any, context: dict[str, Any], *, run_id: str) -> Any:
+    def _execute_llm(
+        self,
+        step: Any,
+        context: dict[str, Any],
+        options: RunnerOptions,
+        manifests: dict[str, Any],
+        run_id: str,
+    ) -> Any:
         task = str(step.config.get("task", "")).strip()
         source = str(step.config.get("source", "")).strip()
         schema_name = step.config.get("schema")
@@ -296,7 +326,18 @@ class WorkflowRunner:
 
         validated = [TimeEntrySuggestion.model_validate(item).model_dump(mode="json") for item in suggestions]
 
-        self.audit.append(
+        # Apply learned patterns (advisory — never breaks a run).
+        try:
+            from matteros.learning.patterns import PatternEngine
+
+            engine = PatternEngine(self.store)
+            validated = engine.apply_patterns(validated)
+        except Exception:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning("pattern application failed", exc_info=True)
+
+        self._audit_and_emit(
             run_id=run_id,
             event_type="llm.output.validated",
             actor="system",
@@ -317,7 +358,7 @@ class WorkflowRunner:
         step: Any,
         context: dict[str, Any],
         options: RunnerOptions,
-        *,
+        manifests: dict[str, Any],
         run_id: str,
     ) -> Any:
         source = str(step.config.get("source", "")).strip()
@@ -325,7 +366,7 @@ class WorkflowRunner:
         suggestions = [TimeEntrySuggestion.model_validate(item) for item in suggestions_raw]
 
         if options.dry_run:
-            self.audit.append(
+            self._audit_and_emit(
                 run_id=run_id,
                 event_type="approval.skipped_dry_run",
                 actor=options.reviewer,
@@ -361,7 +402,7 @@ class WorkflowRunner:
                 entry_payload=entry.model_dump(mode="json") if decision.decision == "approve" else None,
             )
 
-            self.audit.append(
+            self._audit_and_emit(
                 run_id=run_id,
                 event_type="approval.recorded",
                 actor=options.reviewer,
@@ -384,6 +425,7 @@ class WorkflowRunner:
         context: dict[str, Any],
         options: RunnerOptions,
         manifests: dict[str, Any],
+        run_id: str,
     ) -> Any:
         connector_id = str(step.config.get("connector", ""))
         operation = str(step.config.get("operation", ""))
@@ -412,6 +454,37 @@ class WorkflowRunner:
             }
 
         return connector.write(operation, params, payload, context)
+
+    def _audit_and_emit(
+        self,
+        *,
+        run_id: str,
+        event_type: str,
+        actor: str,
+        step_id: str | None,
+        data: dict[str, Any],
+    ) -> None:
+        """Append to audit log and emit to event bus if present."""
+        self.audit.append(
+            run_id=run_id,
+            event_type=event_type,
+            actor=actor,
+            step_id=step_id,
+            data=data,
+        )
+
+        if self.event_bus is not None:
+            try:
+                et = EventType(event_type)
+            except ValueError:
+                return
+            self.event_bus.emit(RunEvent(
+                event_type=et,
+                run_id=run_id,
+                step_id=step_id,
+                actor=actor,
+                data=data,
+            ))
 
     def _resolve_templates(self, value: Any, context: dict[str, Any]) -> Any:
         if isinstance(value, dict):

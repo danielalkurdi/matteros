@@ -28,12 +28,14 @@ def ensure_home_scaffold(*, home: Path) -> dict[str, Path]:
     playbooks_dir = home / "playbooks"
     fixtures_dir = home / "fixtures" / "ms_graph"
     exports_dir = home / "exports"
+    plugins_dir = home / "plugins"
 
     audit_dir.mkdir(parents=True, exist_ok=True)
     auth_dir.mkdir(parents=True, exist_ok=True)
     playbooks_dir.mkdir(parents=True, exist_ok=True)
     fixtures_dir.mkdir(parents=True, exist_ok=True)
     exports_dir.mkdir(parents=True, exist_ok=True)
+    plugins_dir.mkdir(parents=True, exist_ok=True)
 
     sample_playbook_path = playbooks_dir / "daily_time_capture.yml"
     if not sample_playbook_path.exists():
@@ -51,6 +53,7 @@ def ensure_home_scaffold(*, home: Path) -> dict[str, Path]:
         "playbooks_dir": playbooks_dir,
         "fixtures_dir": fixtures_dir,
         "exports_dir": exports_dir,
+        "plugins_dir": plugins_dir,
         "sample_playbook": sample_playbook_path,
     }
 

@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MatterOS - {% block title %}Dashboard{% endblock %}</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/sse.js"></script>
+    <style>
+        :root {
+            --bg: #0f172a; --surface: #1e293b; --border: #334155;
+            --text: #e2e8f0; --muted: #94a3b8; --accent: #3b82f6;
+            --green: #22c55e; --red: #ef4444; --yellow: #eab308;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: var(--bg); color: var(--text); display: flex; min-height: 100vh; }
+        nav { width: 220px; background: var(--surface); border-right: 1px solid var(--border); padding: 1rem; position: fixed; height: 100vh; }
+        nav h1 { font-size: 1.1rem; color: var(--accent); margin-bottom: 1.5rem; }
+        nav a { display: block; padding: 0.5rem 0.75rem; color: var(--muted); text-decoration: none; border-radius: 4px; margin-bottom: 2px; font-size: 0.85rem; }
+        nav a:hover, nav a.active { background: var(--bg); color: var(--text); }
+        main { margin-left: 220px; padding: 1.5rem; flex: 1; }
+        h2 { font-size: 1rem; color: var(--muted); margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+        .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; }
+        .stat .value { font-size: 1.5rem; font-weight: bold; }
+        .stat .label { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
+        table { width: 100%; border-collapse: collapse; background: var(--surface); border-radius: 6px; overflow: hidden; }
+        th { text-align: left; padding: 0.5rem 0.75rem; background: var(--bg); color: var(--muted); font-size: 0.75rem; text-transform: uppercase; }
+        td { padding: 0.5rem 0.75rem; border-top: 1px solid var(--border); font-size: 0.85rem; }
+        tr:hover { background: var(--bg); }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.7rem; }
+        .badge-green { background: #166534; color: var(--green); }
+        .badge-red { background: #7f1d1d; color: var(--red); }
+        .badge-yellow { background: #713f12; color: var(--yellow); }
+        .badge-blue { background: #1e3a5f; color: var(--accent); }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+        .btn { padding: 0.4rem 0.8rem; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); cursor: pointer; font-size: 0.8rem; }
+        .btn:hover { background: var(--bg); }
+        .btn-green { border-color: var(--green); color: var(--green); }
+        .btn-red { border-color: var(--red); color: var(--red); }
+        pre { background: var(--bg); padding: 0.75rem; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; }
+        input, select { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 4px; font-family: inherit; font-size: 0.85rem; }
+    </style>
+</head>
+<body>
+    <nav>
+        <h1>MatterOS</h1>
+        <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
+        <a href="/runs" {% if "/runs" in request.url.path %}class="active"{% endif %}>Runs</a>
+        <a href="/approvals" {% if "/approvals" in request.url.path %}class="active"{% endif %}>Approvals</a>
+        <a href="/drafts" {% if "/drafts" in request.url.path %}class="active"{% endif %}>Drafts</a>
+        <a href="/audit" {% if "/audit" in request.url.path %}class="active"{% endif %}>Audit Log</a>
+        <a href="/settings" {% if "/settings" in request.url.path %}class="active"{% endif %}>Settings</a>
+    </nav>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

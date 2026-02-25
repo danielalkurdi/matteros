@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+from matteros.core.migrations.runner import apply_pending
 
 
 class SQLiteStore:
@@ -16,7 +19,17 @@ class SQLiteStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
         return conn
+
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection that is automatically closed on exit."""
+        conn = self._connect()
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -77,6 +90,7 @@ class SQLiteStore:
                 );
                 """
             )
+            apply_pending(conn)
 
     def create_run(
         self,

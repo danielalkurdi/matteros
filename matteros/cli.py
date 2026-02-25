@@ -19,6 +19,7 @@ from matteros.core.config import (
     load_config,
     save_config_atomic,
 )
+from matteros.core.factory import build_ms_graph_token_manager, build_runner, resolve_home
 from matteros.core.onboarding import build_onboarding_status, ensure_home_scaffold, smoke_test_dry_run
 from matteros.core.playbook import PlaybookError, load_playbook
 from matteros.core.policy import PolicyEngine
@@ -35,52 +36,32 @@ auth_app = typer.Typer(help="Manage authentication")
 llm_app = typer.Typer(help="Inspect LLM runtime configuration")
 onboard_app = typer.Typer(help="Guided onboarding and readiness checks")
 
+drafts_app = typer.Typer(help="Manage proactive time entry drafts")
+daemon_app = typer.Typer(help="Background daemon management")
+team_app = typer.Typer(help="Team mode management")
+
 app.add_typer(connectors_app, name="connectors")
 app.add_typer(playbooks_app, name="playbooks")
 app.add_typer(audit_app, name="audit")
 app.add_typer(auth_app, name="auth")
 app.add_typer(llm_app, name="llm")
 app.add_typer(onboard_app, name="onboard")
+app.add_typer(drafts_app, name="drafts")
+app.add_typer(daemon_app, name="daemon")
+app.add_typer(team_app, name="team")
 
 
-def resolve_home(home: Path | None) -> Path:
-    if home is not None:
-        return home.expanduser().resolve()
-    return Path(".matteros").resolve()
-
-
-def build_runner(home: Path) -> WorkflowRunner:
-    loaded = load_config(path=home / "config.yml", home=home)
-    cfg = loaded.config
-
-    store = SQLiteStore(home / "matteros.db")
-    audit = AuditLogger(store, home / "audit" / "events.jsonl")
-    return WorkflowRunner(
-        store=store,
-        connectors=create_default_registry(auth_cache_path=home / "auth" / "ms_graph_token.json"),
-        llm=LLMAdapter(
-            default_provider=cfg.llm.provider,
-            allow_remote_models=cfg.llm.remote_enabled,
-            model_allowlist=cfg.llm.model_allowlist,
-        ),
-        audit=audit,
-        policy=PolicyEngine(),
-    )
-
-
-def build_ms_graph_token_manager(
-    *,
-    home: Path,
-    tenant_id: str | None = None,
-    client_id: str | None = None,
-    scopes: str | None = None,
-) -> MicrosoftGraphTokenManager:
-    return MicrosoftGraphTokenManager(
-        cache_path=home / "auth" / "ms_graph_token.json",
-        tenant_id=tenant_id,
-        client_id=client_id,
-        scopes=scopes,
-    )
+@app.command("tui")
+def tui_command(
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Launch the interactive TUI dashboard."""
+    try:
+        from matteros.tui.app import run_tui
+    except ImportError:
+        typer.echo("TUI requires textual: pip install matteros[tui]")
+        raise typer.Exit(code=1)
+    run_tui(home=home)
 
 
 @app.command("init")
@@ -106,7 +87,10 @@ def connectors_list(
 ) -> None:
     """List installed connectors and permission manifests."""
     home_dir = resolve_home(home)
-    registry = create_default_registry(auth_cache_path=home_dir / "auth" / "ms_graph_token.json")
+    registry = create_default_registry(
+        auth_cache_path=home_dir / "auth" / "ms_graph_token.json",
+        plugin_dir=home_dir / "plugins",
+    )
     for manifest in registry.list():
         operations = ", ".join(
             f"{operation}:{mode.value}" for operation, mode in manifest.operations.items()
@@ -864,6 +848,635 @@ def _llm_model_name(provider_instance: Any) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return "unknown"
+
+
+@drafts_app.command("list")
+def drafts_list(
+    status: str | None = typer.Option(None, "--status", help="Filter by status: pending|approved|rejected|expired"),
+    limit: int = typer.Option(20, "--limit", min=1, help="Max entries to show"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """List proactive time entry drafts."""
+    home_dir = resolve_home(home)
+    store = SQLiteStore(home_dir / "matteros.db")
+
+    from matteros.drafts.manager import DraftManager
+
+    manager = DraftManager(store)
+    drafts = manager.list_drafts(status=status, limit=limit)
+
+    if not drafts:
+        typer.echo("no drafts found")
+        return
+
+    for draft in drafts:
+        entry = draft.get("entry", {})
+        typer.echo(
+            f"{draft['id'][:8]} | {draft['status']} | matter={entry.get('matter_id', '?')} "
+            f"duration={entry.get('duration_minutes', '?')}m | {draft['created_at'][:19]}"
+        )
+
+
+@drafts_app.command("approve")
+def drafts_approve(
+    draft_id: str = typer.Argument(..., help="Draft ID (or prefix)"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Approve a pending draft."""
+    home_dir = resolve_home(home)
+    store = SQLiteStore(home_dir / "matteros.db")
+
+    from matteros.drafts.manager import DraftManager
+
+    manager = DraftManager(store)
+    draft = manager.get_draft(draft_id)
+    if not draft:
+        typer.echo(f"draft not found: {draft_id}")
+        raise typer.Exit(code=1)
+    if draft["status"] != "pending":
+        typer.echo(f"draft {draft_id[:8]} is already {draft['status']}")
+        raise typer.Exit(code=1)
+
+    manager.approve_draft(draft_id)
+
+    from matteros.learning.feedback import FeedbackTracker
+
+    FeedbackTracker(store).record_feedback(draft_id, "approved")
+    typer.echo(f"approved draft {draft_id[:8]}")
+
+
+@drafts_app.command("reject")
+def drafts_reject(
+    draft_id: str = typer.Argument(..., help="Draft ID (or prefix)"),
+    reason: str | None = typer.Option(None, "--reason", "-r", help="Rejection reason"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Reject a pending draft."""
+    home_dir = resolve_home(home)
+    store = SQLiteStore(home_dir / "matteros.db")
+
+    from matteros.drafts.manager import DraftManager
+
+    manager = DraftManager(store)
+    draft = manager.get_draft(draft_id)
+    if not draft:
+        typer.echo(f"draft not found: {draft_id}")
+        raise typer.Exit(code=1)
+
+    manager.reject_draft(draft_id)
+
+    from matteros.learning.feedback import FeedbackTracker
+
+    FeedbackTracker(store).record_feedback(draft_id, "rejected", reason=reason)
+    typer.echo(f"rejected draft {draft_id[:8]}")
+
+
+@app.command("web")
+def web_command(
+    port: int = typer.Option(8741, "--port", help="Port to serve on"),
+    open_browser: bool = typer.Option(False, "--open", help="Open browser after start"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Launch the web UI dashboard."""
+    try:
+        from matteros.web.app import create_app
+    except ImportError:
+        typer.echo("Web UI requires: pip install matteros[web]")
+        raise typer.Exit(code=1)
+
+    import uvicorn
+    from urllib.parse import quote
+
+    home_dir = resolve_home(home)
+    app_instance = create_app(home=home_dir)
+    base_url = f"http://127.0.0.1:{port}"
+    token = str(getattr(app_instance.state, "web_token", ""))
+    token_query_param = str(getattr(app_instance.state, "auth_query_param", "access_token"))
+    bootstrap_url = (
+        f"{base_url}/?{token_query_param}={quote(token, safe='')}"
+        if token
+        else base_url
+    )
+
+    typer.echo(f"starting MatterOS web UI on {base_url}")
+    if token:
+        typer.echo(f"web auth bootstrap URL (keep private): {bootstrap_url}")
+
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(bootstrap_url)
+
+    uvicorn.run(app_instance, host="127.0.0.1", port=port, log_level="info")
+
+
+@daemon_app.command("start")
+def daemon_start(
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Start the background daemon (forks into background, writes PID)."""
+    import asyncio
+    import signal
+    import sys
+
+    from matteros.daemon.process import ensure_not_running, remove_pid, write_pid
+    from matteros.daemon.scheduler import PlaybookScheduler
+
+    home_dir = resolve_home(home)
+
+    try:
+        ensure_not_running(home_dir)
+    except RuntimeError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1)
+
+    log_dir = home_dir / "daemon"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "matteros.log"
+
+    if sys.platform == "win32":
+        typer.echo("error: daemon mode requires fork() which is not available on Windows")
+        typer.echo("hint: run 'matteros daemon start --foreground' or use WSL")
+        raise typer.Exit(code=1)
+
+    pid = os.fork()
+    if pid > 0:
+        typer.echo(f"daemon started (pid {pid})")
+        typer.echo(f"log: {log_file}")
+        return
+
+    # Child process: detach and run the scheduler.
+    os.setsid()
+    sys.stdin.close()
+    sys.stdout = open(log_file, "a", encoding="utf-8")  # noqa: SIM115
+    sys.stderr = sys.stdout
+
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        stream=sys.stdout,
+    )
+    logger = logging.getLogger("matteros.daemon")
+
+    pid_path = write_pid(home_dir)
+    logger.info("daemon pid %d written to %s", os.getpid(), pid_path)
+
+    scheduler = PlaybookScheduler(home_dir)
+
+    # Set up activity watcher for workspace path.
+    from matteros.daemon.watcher import ActivityWatcher
+
+    watcher = None
+    try:
+        loaded = load_config(path=home_dir / "config.yml", home=home_dir)
+        workspace = Path(loaded.config.paths.workspace_path).expanduser()
+        if workspace.exists():
+            def _on_activity(changed_paths: list[Path]) -> None:
+                logger.info("activity detected: %d changed files", len(changed_paths))
+                for jid in list(scheduler._jobs):
+                    asyncio.run_coroutine_threadsafe(scheduler.run_once(jid), loop)
+
+            watcher = ActivityWatcher(
+                watch_paths=[workspace],
+                callback=_on_activity,
+            )
+    except Exception:
+        logger.warning("could not set up activity watcher", exc_info=True)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def _handle_term(_sig: int, _frame: Any) -> None:
+        logger.info("received signal %d, stopping", _sig)
+        loop.call_soon_threadsafe(loop.stop)
+
+    signal.signal(signal.SIGTERM, _handle_term)
+    signal.signal(signal.SIGINT, _handle_term)
+
+    try:
+        loop.run_until_complete(scheduler.start())
+        if watcher is not None:
+            loop.run_until_complete(watcher.start())
+        loop.run_forever()
+    finally:
+        if watcher is not None:
+            loop.run_until_complete(watcher.stop())
+        loop.run_until_complete(scheduler.stop())
+        loop.close()
+        remove_pid(home_dir)
+        logger.info("daemon stopped")
+
+
+@daemon_app.command("stop")
+def daemon_stop(
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Send SIGTERM to the running daemon."""
+    import signal
+
+    from matteros.daemon.process import is_running, read_pid
+
+    home_dir = resolve_home(home)
+    pid = read_pid(home_dir)
+
+    if pid is None or not is_running(home_dir):
+        typer.echo("daemon is not running")
+        raise typer.Exit(code=1)
+
+    os.kill(pid, signal.SIGTERM)
+    typer.echo(f"sent SIGTERM to daemon (pid {pid})")
+
+
+@daemon_app.command("status")
+def daemon_status(
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Show daemon status: running/stopped, PID, uptime."""
+    from matteros.daemon.process import is_running, read_pid
+
+    home_dir = resolve_home(home)
+    pid = read_pid(home_dir)
+
+    if pid is None or not is_running(home_dir):
+        typer.echo("daemon: stopped")
+        return
+
+    typer.echo(f"daemon: running")
+    typer.echo(f"pid: {pid}")
+
+    pid_file = home_dir / "daemon" / "matteros.pid"
+    if pid_file.exists():
+        mtime = pid_file.stat().st_mtime
+        started = datetime.fromtimestamp(mtime, tz=UTC)
+        uptime = datetime.now(UTC) - started
+        hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        typer.echo(f"uptime: {hours}h {minutes}m {seconds}s")
+
+
+@daemon_app.command("logs")
+def daemon_logs(
+    lines: int = typer.Option(50, "--lines", "-n", min=1, help="Number of lines to show"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Show last N lines from daemon log."""
+    home_dir = resolve_home(home)
+    log_file = home_dir / "daemon" / "matteros.log"
+
+    if not log_file.exists():
+        typer.echo("no daemon log found")
+        raise typer.Exit(code=1)
+
+    all_lines = log_file.read_text(encoding="utf-8").splitlines()
+    for line in all_lines[-lines:]:
+        typer.echo(line)
+
+
+@team_app.command("init")
+def team_init(
+    admin_username: str = typer.Option("admin", "--admin", help="Admin username"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Initialize team mode: create users table, admin account."""
+    home_dir = resolve_home(home)
+    store = SQLiteStore(home_dir / "matteros.db")
+
+    from matteros.team.users import UserManager
+
+    manager = UserManager(store)
+
+    existing = manager.get_user_by_username(admin_username)
+    if existing:
+        typer.echo(f"admin user '{admin_username}' already exists")
+        return
+
+    import secrets
+
+    temp_password = secrets.token_urlsafe(16)
+    import hashlib
+
+    password_hash = hashlib.sha256(temp_password.encode()).hexdigest()
+
+    user_id = manager.create_user(
+        username=admin_username,
+        role="admin",
+        password_hash=password_hash,
+    )
+    typer.echo(f"team mode initialized")
+    typer.echo(f"admin user: {admin_username} (id: {user_id[:8]})")
+    typer.echo(f"temporary password: {temp_password}")
+    typer.echo("change this password immediately")
+
+
+@team_app.command("add-user")
+def team_add_user(
+    username: str = typer.Argument(..., help="Username"),
+    role: str = typer.Option("attorney", "--role", help="Role: admin|attorney|reviewer"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Add a user to the team."""
+    home_dir = resolve_home(home)
+    store = SQLiteStore(home_dir / "matteros.db")
+
+    from matteros.team.users import UserManager
+
+    manager = UserManager(store)
+
+    existing = manager.get_user_by_username(username)
+    if existing:
+        typer.echo(f"user '{username}' already exists")
+        raise typer.Exit(code=1)
+
+    import secrets
+
+    temp_password = secrets.token_urlsafe(16)
+    import hashlib
+
+    password_hash = hashlib.sha256(temp_password.encode()).hexdigest()
+
+    user_id = manager.create_user(username=username, role=role, password_hash=password_hash)
+    typer.echo(f"created user: {username} (role={role}, id={user_id[:8]})")
+    typer.echo(f"temporary password: {temp_password}")
+
+
+@team_app.command("list-users")
+def team_list_users(
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """List all team users."""
+    home_dir = resolve_home(home)
+    store = SQLiteStore(home_dir / "matteros.db")
+
+    from matteros.team.users import UserManager
+
+    manager = UserManager(store)
+    users = manager.list_users()
+
+    if not users:
+        typer.echo("no users found (run `matteros team init` first)")
+        return
+
+    for user in users:
+        typer.echo(f"{user['id'][:8]} | {user['username']} | role={user['role']} | {user['created_at'][:19]}")
+
+
+@team_app.command("report")
+def team_report(
+    report_type: str = typer.Argument("summary", help="Report type: summary|matters|attorneys"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Generate team reports."""
+    home_dir = resolve_home(home)
+    store = SQLiteStore(home_dir / "matteros.db")
+
+    from matteros.team.reports import TeamReports
+
+    reports = TeamReports(store)
+
+    if report_type == "matters":
+        data = reports.hours_by_matter()
+        if not data:
+            typer.echo("no approved entries found")
+            return
+        typer.echo("hours by matter:")
+        for item in data:
+            typer.echo(f"  {item['matter_id']}: {item['total_hours']}h ({item['total_minutes']}m)")
+
+    elif report_type == "attorneys":
+        data = reports.hours_by_attorney()
+        if not data:
+            typer.echo("no approved entries found")
+            return
+        typer.echo("hours by attorney:")
+        for item in data:
+            typer.echo(f"  {item['attorney']}: {item['total_hours']}h ({item['total_minutes']}m)")
+
+    else:
+        queue = reports.approval_queue_depth()
+        weekly = reports.weekly_summary()
+        typer.echo("approval queue:")
+        for decision, count in queue.items():
+            typer.echo(f"  {decision}: {count}")
+        if weekly:
+            typer.echo("weekly summary:")
+            for week in weekly:
+                typer.echo(
+                    f"  {week['week']}: {week['run_count']} runs "
+                    f"({week['completed']} completed, {week['failed']} failed)"
+                )
+
+
+@app.command("review")
+def review_command(
+    limit: int = typer.Option(20, "--limit", help="Max drafts to review"),
+    auto_approve: float | None = typer.Option(None, "--auto-approve", help="Auto-approve threshold (0.0-1.0)"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Interactive batch review of pending drafts."""
+    home_dir = resolve_home(home)
+    store = SQLiteStore(home_dir / "matteros.db")
+
+    from matteros.drafts.manager import DraftManager
+    from matteros.learning.feedback import FeedbackTracker
+
+    manager = DraftManager(store)
+    tracker = FeedbackTracker(store)
+
+    drafts = manager.list_drafts(status="pending", limit=limit)
+    if not drafts:
+        typer.echo("no pending drafts")
+        return
+
+    approved_count = 0
+    rejected_count = 0
+    skipped_count = 0
+
+    for draft in drafts:
+        entry = draft.get("entry", {})
+        confidence = float(entry.get("confidence", 0))
+
+        # Auto-approve if above threshold.
+        if auto_approve is not None and confidence >= auto_approve:
+            manager.approve_draft(draft["id"])
+            tracker.record_feedback(draft["id"], "approved")
+            approved_count += 1
+            typer.echo(f"  auto-approved {draft['id'][:8]} (confidence={confidence:.2f})")
+            continue
+
+        typer.echo(f"\n--- Draft {draft['id'][:8]} ---")
+        typer.echo(f"  matter:     {entry.get('matter_id', '?')}")
+        typer.echo(f"  duration:   {entry.get('duration_minutes', '?')}m")
+        typer.echo(f"  confidence: {confidence:.2f}")
+        typer.echo(f"  narrative:  {entry.get('narrative', '(none)')}")
+
+        action = typer.prompt("[a]pprove / [r]eject / [e]dit / [s]kip / [q]uit", default="s")
+        action = action.strip().lower()
+
+        if action in ("a", "approve"):
+            manager.approve_draft(draft["id"])
+            tracker.record_feedback(draft["id"], "approved")
+            approved_count += 1
+        elif action in ("r", "reject"):
+            reason = typer.prompt("reason (optional)", default="")
+            manager.reject_draft(draft["id"])
+            tracker.record_feedback(draft["id"], "rejected", reason=reason or None)
+            rejected_count += 1
+        elif action in ("e", "edit"):
+            new_narrative = typer.prompt("narrative", default=entry.get("narrative", ""))
+            new_duration = typer.prompt("duration_minutes", default=str(entry.get("duration_minutes", 0)))
+            entry["narrative"] = new_narrative
+            try:
+                entry["duration_minutes"] = int(new_duration)
+            except ValueError:
+                pass
+            manager.update_entry(draft["id"], entry)
+            manager.approve_draft(draft["id"])
+            tracker.record_feedback(draft["id"], "edited")
+            approved_count += 1
+        elif action in ("q", "quit"):
+            break
+        else:
+            skipped_count += 1
+
+    typer.echo(f"\n{approved_count} approved, {rejected_count} rejected, {skipped_count} skipped")
+
+
+@app.command("learn")
+def learn_command(
+    run_id: str | None = typer.Option(None, "--run-id", help="Learn from a specific run"),
+    all_runs: bool = typer.Option(False, "--all", help="Learn from all runs with approvals"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Trigger pattern learning from approval history."""
+    home_dir = resolve_home(home)
+    store = SQLiteStore(home_dir / "matteros.db")
+
+    from matteros.learning.feedback import FeedbackTracker
+    from matteros.learning.patterns import PatternEngine
+
+    engine = PatternEngine(store)
+
+    if run_id:
+        patterns = engine.learn_from_approvals(run_id)
+        typer.echo(f"learned {len(patterns)} patterns from run {run_id[:8]}")
+        for p in patterns:
+            typer.echo(f"  {p['pattern_type']} | matter={p['matter_id']} | confidence={p['confidence']:.2f}")
+    elif all_runs:
+        with store.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT run_id FROM approvals"
+            ).fetchall()
+        run_ids = [row["run_id"] for row in rows]
+        total_patterns = 0
+        for rid in run_ids:
+            patterns = engine.learn_from_approvals(rid)
+            total_patterns += len(patterns)
+        typer.echo(f"learned from {len(run_ids)} runs, {total_patterns} patterns total")
+    else:
+        typer.echo("specify --run-id ID or --all")
+        raise typer.Exit(code=1)
+
+    # Print feedback stats and pattern count.
+    tracker = FeedbackTracker(store)
+    stats = tracker.get_feedback_stats()
+    typer.echo(f"\nfeedback stats: {stats['total']} reviews, "
+               f"{stats['approved']} approved, {stats['rejected']} rejected, "
+               f"approval rate={stats['approval_rate']:.1%}")
+
+    all_patterns = engine.get_patterns()
+    typer.echo(f"total stored patterns: {len(all_patterns)}")
+
+
+@app.command("digest")
+def digest_command(
+    period: str = typer.Option("week", "--period", help="Period: day, week, or month"),
+    home: Path | None = typer.Option(None, help="MatterOS home directory"),
+) -> None:
+    """Period summary report of tracked time."""
+    from datetime import timedelta
+
+    home_dir = resolve_home(home)
+    store = SQLiteStore(home_dir / "matteros.db")
+
+    now = datetime.now(UTC)
+    if period == "day":
+        cutoff = (now - timedelta(days=1)).isoformat()
+    elif period == "month":
+        cutoff = (now - timedelta(days=30)).isoformat()
+    else:
+        cutoff = (now - timedelta(days=7)).isoformat()
+
+    typer.echo(f"--- MatterOS Digest ({period}) ---")
+
+    # Total approved hours from drafts.
+    with store.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(json_extract(entry_json, '$.duration_minutes')), 0) as total_minutes
+            FROM drafts
+            WHERE status = 'approved' AND updated_at >= ?
+            """,
+            (cutoff,),
+        ).fetchone()
+        total_minutes = row["total_minutes"] if row else 0
+        typer.echo(f"total approved hours: {total_minutes / 60:.1f}h")
+
+        # Hours by matter.
+        rows = conn.execute(
+            """
+            SELECT json_extract(entry_json, '$.matter_id') as matter_id,
+                   SUM(json_extract(entry_json, '$.duration_minutes')) as minutes
+            FROM drafts
+            WHERE status = 'approved' AND updated_at >= ?
+            GROUP BY matter_id
+            ORDER BY minutes DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+        if rows:
+            typer.echo("\nhours by matter:")
+            for r in rows:
+                mid = r["matter_id"] or "UNASSIGNED"
+                mins = r["minutes"] or 0
+                typer.echo(f"  {mid:20s} {mins / 60:.1f}h")
+
+        # Pending drafts.
+        pending_row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM drafts WHERE status = 'pending'"
+        ).fetchone()
+        typer.echo(f"\npending drafts: {pending_row['cnt']}")
+
+        # Approval rate from feedback_log.
+        fb_rows = conn.execute(
+            "SELECT action, COUNT(*) as cnt FROM feedback_log GROUP BY action"
+        ).fetchall()
+        fb_counts: dict[str, int] = {r["action"]: r["cnt"] for r in fb_rows}
+        fb_total = sum(fb_counts.values())
+        fb_approved = fb_counts.get("approved", 0) + fb_counts.get("edited", 0)
+        if fb_total > 0:
+            typer.echo(f"approval rate: {fb_approved / fb_total:.1%} ({fb_total} reviews)")
+        else:
+            typer.echo("approval rate: n/a (no reviews)")
+
+        # Weekly trends from runs.
+        trend_rows = conn.execute(
+            """
+            SELECT strftime('%Y-W%W', started_at) as week,
+                   COUNT(*) as run_count,
+                   SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as ok,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+            FROM runs
+            GROUP BY week
+            ORDER BY week DESC
+            LIMIT 4
+            """
+        ).fetchall()
+        if trend_rows:
+            typer.echo("\nweekly trends:")
+            for tr in trend_rows:
+                typer.echo(f"  {tr['week']}: {tr['run_count']} runs ({tr['ok']} ok, {tr['failed']} failed)")
 
 
 def main() -> None:

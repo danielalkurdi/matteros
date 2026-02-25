@@ -50,3 +50,33 @@ ms_graph_scopes: offline_access User.Read
     assert cfg.log_level == "debug"
     assert cfg.ms_graph.tenant_id == "my-tenant"
     assert cfg.ms_graph.scopes == "offline_access User.Read"
+
+
+def test_load_config_migration_preserves_legacy_path_fields(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+
+    workspace = tmp_path / "legacy-workspace"
+    playbook = tmp_path / "legacy-playbook.yml"
+    fixtures = tmp_path / "legacy-fixtures"
+
+    cfg_path = home / "config.yml"
+    cfg_path.write_text(
+        f"""
+model_provider: local
+workspace_path: {workspace}
+default_playbook: {playbook}
+fixtures_root: {fixtures}
+profile_name: legacy-profile
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_config(path=cfg_path, home=home)
+    cfg = loaded.config
+
+    assert loaded.migrated is True
+    assert cfg.paths.workspace_path == str(workspace.resolve())
+    assert cfg.paths.default_playbook == str(playbook.resolve())
+    assert cfg.paths.fixtures_root == str(fixtures.resolve())
+    assert cfg.profile.name == "legacy-profile"

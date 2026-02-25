@@ -55,6 +55,15 @@ class OnboardingConfig(BaseModel):
     last_smoke_test_run_id: str | None = None
 
 
+class ConnectorsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slack_enabled: bool = False
+    jira_enabled: bool = False
+    github_enabled: bool = False
+    ical_enabled: bool = True
+
+
 class MatterOSConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -65,6 +74,7 @@ class MatterOSConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ms_graph: MSGraphConfig = Field(default_factory=MSGraphConfig)
     onboarding: OnboardingConfig = Field(default_factory=OnboardingConfig)
+    connectors: ConnectorsConfig = Field(default_factory=ConnectorsConfig)
 
 
 class LoadedConfig(BaseModel):
@@ -164,6 +174,36 @@ def _migrate_legacy_payload(payload: dict[str, Any], *, home: Path) -> dict[str,
     remote_enabled = model_provider in {"openai", "anthropic"}
 
     migrated = default_config(home=home).model_dump(mode="json")
+
+    # Preserve compatible nested sections when present in pre-versioned configs.
+    for section in ("profile", "paths", "llm", "ms_graph", "onboarding", "connectors"):
+        value = payload.get(section)
+        if isinstance(value, dict):
+            merged = dict(migrated.get(section, {}))
+            merged.update(value)
+            migrated[section] = merged
+
+    # Preserve commonly-seen flat path/profile keys from older config variants.
+    workspace_path = payload.get("workspace_path")
+    if isinstance(workspace_path, str) and workspace_path.strip():
+        migrated["paths"]["workspace_path"] = workspace_path
+
+    default_playbook = payload.get("default_playbook")
+    if isinstance(default_playbook, str) and default_playbook.strip():
+        migrated["paths"]["default_playbook"] = default_playbook
+
+    fixtures_root = payload.get("fixtures_root")
+    if isinstance(fixtures_root, str) and fixtures_root.strip():
+        migrated["paths"]["fixtures_root"] = fixtures_root
+
+    profile_name = payload.get("profile_name")
+    if isinstance(profile_name, str) and profile_name.strip():
+        migrated["profile"]["name"] = profile_name
+
+    profile_payload = payload.get("profile")
+    if isinstance(profile_payload, str) and profile_payload.strip():
+        migrated["profile"]["name"] = profile_payload
+
     migrated["log_level"] = log_level
     migrated["llm"]["provider"] = model_provider
     migrated["llm"]["remote_enabled"] = remote_enabled

@@ -96,6 +96,115 @@ def flatten_activity_inputs(payload: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
+    for msg in payload.get("slack_messages", []):
+        text = str(msg.get("text", "Slack message"))
+        ts = msg.get("ts")
+        timestamp = None
+        if ts:
+            try:
+                timestamp = datetime.fromtimestamp(float(str(ts)), tz=UTC).isoformat()
+            except (ValueError, OSError):
+                pass
+        inferred = infer_matter_id([text, matter_hint], fallback="UNASSIGNED")
+        normalized.append(
+            {
+                "kind": "message",
+                "title": text[:120],
+                "duration_minutes": 3,
+                "timestamp": timestamp,
+                "matter_id": inferred,
+                "evidence_ref": str(msg.get("ts", f"slack:{len(normalized)}")),
+            }
+        )
+
+    for wl in payload.get("jira_worklogs", []):
+        comment = str(wl.get("comment", wl.get("issueKey", "Jira worklog")))
+        seconds = int(wl.get("timeSpentSeconds", 0))
+        duration = max(1, seconds // 60) if seconds else 6
+        started = wl.get("started")
+        timestamp = parse_iso(str(started)) if started else None
+        inferred = infer_matter_id([comment, str(wl.get("issueKey", "")), matter_hint], fallback="UNASSIGNED")
+        normalized.append(
+            {
+                "kind": "worklog",
+                "title": comment[:120],
+                "duration_minutes": duration,
+                "timestamp": timestamp.isoformat() if timestamp else None,
+                "matter_id": inferred,
+                "evidence_ref": str(wl.get("id", f"jira-wl:{len(normalized)}")),
+            }
+        )
+
+    for issue in payload.get("jira_issues", []):
+        summary = str(issue.get("fields", {}).get("summary", issue.get("key", "Jira issue")))
+        key = str(issue.get("key", ""))
+        updated = issue.get("fields", {}).get("updated")
+        timestamp = parse_iso(str(updated)) if updated else None
+        inferred = infer_matter_id([summary, key, matter_hint], fallback="UNASSIGNED")
+        normalized.append(
+            {
+                "kind": "issue",
+                "title": f"{key}: {summary}" if key else summary,
+                "duration_minutes": 10,
+                "timestamp": timestamp.isoformat() if timestamp else None,
+                "matter_id": inferred,
+                "evidence_ref": key or f"jira-issue:{len(normalized)}",
+            }
+        )
+
+    for commit in payload.get("github_commits", []):
+        message = str(commit.get("commit", {}).get("message", "GitHub commit"))
+        sha = str(commit.get("sha", ""))[:8]
+        commit_date = commit.get("commit", {}).get("author", {}).get("date")
+        timestamp = parse_iso(str(commit_date)) if commit_date else None
+        inferred = infer_matter_id([message, matter_hint], fallback="UNASSIGNED")
+        normalized.append(
+            {
+                "kind": "commit",
+                "title": message.split("\n")[0][:120],
+                "duration_minutes": 8,
+                "timestamp": timestamp.isoformat() if timestamp else None,
+                "matter_id": inferred,
+                "evidence_ref": sha or f"gh-commit:{len(normalized)}",
+            }
+        )
+
+    for pr in payload.get("github_prs", []):
+        title = str(pr.get("title", "GitHub PR"))
+        number = pr.get("number", "")
+        created = pr.get("created_at")
+        timestamp = parse_iso(str(created)) if created else None
+        inferred = infer_matter_id([title, matter_hint], fallback="UNASSIGNED")
+        normalized.append(
+            {
+                "kind": "pr",
+                "title": f"PR #{number}: {title}" if number else title,
+                "duration_minutes": 15,
+                "timestamp": timestamp.isoformat() if timestamp else None,
+                "matter_id": inferred,
+                "evidence_ref": f"pr:{number}" if number else f"gh-pr:{len(normalized)}",
+            }
+        )
+
+    for event in payload.get("ical_events", []):
+        summary = str(event.get("summary", "Calendar event"))
+        start_dt = parse_iso(str(event.get("dtstart", "")))
+        end_dt = parse_iso(str(event.get("dtend", "")))
+        duration = 30
+        if start_dt and end_dt and end_dt > start_dt:
+            duration = max(6, int((end_dt - start_dt).total_seconds() // 60))
+        inferred = infer_matter_id([summary, matter_hint], fallback="UNASSIGNED")
+        normalized.append(
+            {
+                "kind": "calendar",
+                "title": summary,
+                "duration_minutes": duration,
+                "timestamp": start_dt.isoformat() if start_dt else None,
+                "matter_id": inferred,
+                "evidence_ref": str(event.get("uid", f"ical:{len(normalized)}")),
+            }
+        )
+
     return normalized
 
 

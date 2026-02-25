@@ -69,6 +69,40 @@ def default_manifests() -> dict[str, ConnectorManifest]:
             default_mode=PermissionMode.WRITE,
             operations={"export_time_entries": PermissionMode.WRITE},
         ),
+        "slack": ConnectorManifest(
+            connector_id="slack",
+            description="Read and post messages via Slack Web API",
+            default_mode=PermissionMode.READ,
+            operations={
+                "messages": PermissionMode.READ,
+                "post_summary": PermissionMode.WRITE,
+            },
+        ),
+        "jira": ConnectorManifest(
+            connector_id="jira",
+            description="Read worklogs/issues and log time via Jira REST API",
+            default_mode=PermissionMode.READ,
+            operations={
+                "worklogs": PermissionMode.READ,
+                "issues": PermissionMode.READ,
+                "log_time": PermissionMode.WRITE,
+            },
+        ),
+        "github": ConnectorManifest(
+            connector_id="github",
+            description="Read commits and pull requests from GitHub API",
+            default_mode=PermissionMode.READ,
+            operations={
+                "commits": PermissionMode.READ,
+                "prs": PermissionMode.READ,
+            },
+        ),
+        "ical": ConnectorManifest(
+            connector_id="ical",
+            description="Read events from local iCal (.ics) files",
+            default_mode=PermissionMode.READ,
+            operations={"events": PermissionMode.READ},
+        ),
     }
 
 

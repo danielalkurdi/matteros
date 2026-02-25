@@ -1,0 +1,15 @@
+# Default owners
+* @danielalkurdi
+
+# CI / release controls
+.github/workflows/* @danielalkurdi
+
+# Security and policy docs
+SECURITY.md @danielalkurdi
+docs/threat-model.md @danielalkurdi
+docs/policy-model.md @danielalkurdi
+
+# Core runtime and connector surfaces
+matteros/core/* @danielalkurdi
+matteros/connectors/* @danielalkurdi
+matteros/llm/* @danielalkurdi
